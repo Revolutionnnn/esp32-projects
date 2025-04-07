@@ -1,0 +1,46 @@
+#include "esp_wifi.h"
+#include "WiFi.h"
+
+const char* ssidBase = "Falsa_Red_";
+int totalRedes = 30;
+
+void setup() {
+}
+
+void loop() {
+}
+
+void sendFakeBeacon(const char* ssid, int index) {
+  uint8_t packet[128] = {
+    // Cabecera
+    0x80, 0x00, 0x00, 0x00,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0x24, 0x6f, 0x28, 0xaa, 0xbb, 0xcc,
+    0x24, 0x6f, 0x28, 0xaa, 0xbb, 0xcc,
+    0x00, 0x00,
+
+    // Parámetros fijos
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x64, 0x00,
+    0x01, 0x04,
+
+    // Conjunto de parámetros SSID (comienza aquí)
+    0x00, 0x00 // Tag de SSID y longitud (se reemplaza abajo)
+  };
+
+  // Se crea un MAC único modificando el último byte según el índice
+  uint8_t mac[6] = {0x24, 0x6F, 0x28, 0xAA, 0xBB, 0xCC};
+  mac[5] = 0xCC + index;  // Cambia el último byte para cada red
+
+  // Actualiza el paquete con el MAC único
+  memcpy(packet + 10, mac, 6); // Dirección de origen
+  memcpy(packet + 16, mac, 6); // BSSID
+
+  // Configura el SSID en el paquete
+  int ssidLen = strlen(ssid);
+  packet[37] = ssidLen;          // Establece la longitud del SSID
+  memcpy(packet + 38, ssid, ssidLen); // Copia el SSID
+
+  // Envía el paquete beacon
+  esp_wifi_80211_tx(WIFI_IF_AP, packet, 38 + ssidLen, false);
+}
