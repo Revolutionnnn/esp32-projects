@@ -1,0 +1,84 @@
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <ArduinoWebsockets.h>
+
+using namespace websockets;
+
+// Configuración WiFi
+const char* ssid = "TU_WIFI";
+const char* password = "TU_PASSWORD";
+
+// Configuración del WebSocket (reemplaza la URL con la de tu nodo o servicio)
+const char* ws_server = "ws://TU_SERVIDOR:26657/websocket";
+
+// Configuración de Telegram
+String telegramToken = "TU_BOT_TOKEN";
+String chatID = "TU_CHAT_ID";
+
+// Crear el cliente de WebSocket
+WebsocketsClient wsClient;
+
+// Función para enviar mensaje a Telegram vía HTTP GET
+void sendTelegramMessage(String msg) {
+  if(WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    // Construye la URL para enviar el mensaje
+    String url = "https://api.telegram.org/bot" + telegramToken + 
+                 "/sendMessage?chat_id=" + chatID + "&text=" + msg;
+    http.begin(url);
+    int httpCode = http.GET();
+    if(httpCode > 0) {
+      Serial.println("Mensaje enviado a Telegram");
+    } else {
+      Serial.print("Error enviando a Telegram: ");
+      Serial.println(http.errorToString(httpCode));
+    }
+    http.end();
+  }
+}
+
+// Callback que se ejecuta cuando se recibe un mensaje del WebSocket
+void onMessageCallback(WebsocketsMessage message) {
+  Serial.println("Evento recibido:");
+  Serial.println(message.data());
+  
+  // Por simplicidad, se envía el mensaje tal como llega.
+  // Puedes procesarlo o extraer la información que te interese.
+  String telegramMsg = "Nueva transacción:\n" + message.data();
+  sendTelegramMessage(telegramMsg);
+}
+
+void setup() {
+  Serial.begin(115200);
+  
+  // Conexión a WiFi
+  WiFi.begin(ssid, password);
+  Serial.println("Conectando a WiFi...");
+  while(WiFi.status() != WL_CONNECTED) {
+    delay(1000);
+    Serial.print(".");
+  }
+  Serial.println("\nWiFi conectado");
+
+  // Configurar el callback para recibir mensajes del WebSocket
+  wsClient.onMessage(onMessageCallback);
+
+  // Conectarse al servidor WebSocket
+  Serial.println("Conectando al WebSocket...");
+  if(wsClient.connect(ws_server)) {
+    Serial.println("Conectado al WebSocket");
+    
+    // Enviar mensaje de suscripción al evento "Tx"
+    String subscribeMsg = "{\"jsonrpc\": \"2.0\", \"method\": \"subscribe\", \"id\": 0, \"params\": {\"query\": \"tm.event='Tx'\"}}";
+    wsClient.send(subscribeMsg);
+    Serial.println("Mensaje de suscripción enviado");
+  } else {
+    Serial.println("No se pudo conectar al WebSocket");
+  }
+}
+
+void loop() {
+  // Mantiene viva la conexión WebSocket y detecta mensajes entrantes
+  wsClient.poll();
+  delay(10);
+}
