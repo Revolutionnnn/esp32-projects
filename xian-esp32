@@ -1,84 +1,218 @@
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <ArduinoWebsockets.h>
+#include <ArduinoJson.h>
+#include <Base64.h>  // Asegúrate de tener instalada esta librería
 
 using namespace websockets;
 
 // Configuración WiFi
-const char* ssid = "TU_WIFI";
-const char* password = "TU_PASSWORD";
+const char* ssid = "";
+const char* password = "";
 
-// Configuración del WebSocket (reemplaza la URL con la de tu nodo o servicio)
-const char* ws_server = "ws://TU_SERVIDOR:26657/websocket";
+// Configuración del WebSocket
+const char* ws_server = "";
 
 // Configuración de Telegram
-String telegramToken = "TU_BOT_TOKEN";
-String chatID = "TU_CHAT_ID";
+String telegramToken = "";
+String chatID = "";
 
-// Crear el cliente de WebSocket
+// Cliente de WebSocket
 WebsocketsClient wsClient;
+
+// Función simple para URL encode
+String urlencode(String str) {
+  String encoded = "";
+  for (int i = 0; i < str.length(); i++){
+    char c = str.charAt(i);
+    if (isalnum(c)) {
+      encoded += c;
+    } else {
+      encoded += '%';
+      char hex1 = (c >> 4) & 0xF;
+      char hex2 = c & 0xF;
+      encoded += (hex1 < 10 ? char('0' + hex1) : char('A' + (hex1 - 10)));
+      encoded += (hex2 < 10 ? char('0' + hex2) : char('A' + (hex2 - 10)));
+    }
+  }
+  return encoded;
+}
 
 // Función para enviar mensaje a Telegram vía HTTP GET
 void sendTelegramMessage(String msg) {
-  if(WiFi.status() == WL_CONNECTED) {
+  if (WiFi.status() == WL_CONNECTED) {
     HTTPClient http;
-    // Construye la URL para enviar el mensaje
-    String url = "https://api.telegram.org/bot" + telegramToken + 
-                 "/sendMessage?chat_id=" + chatID + "&text=" + msg;
-    http.begin(url);
+    String encodedMsg = urlencode(msg);
+    String url = "https://api.telegram.org/bot" + telegramToken +
+                 "/sendMessage?chat_id=" + chatID + "&text=" + encodedMsg;
+    Serial.println("Enviando a Telegram, URL:");
+    Serial.println(url);
+    
+    http.begin(url.c_str());
+    http.setTimeout(5000);  // Tiempo de espera de 5 segundos
+    
     int httpCode = http.GET();
-    if(httpCode > 0) {
+    if (httpCode > 0) {
       Serial.println("Mensaje enviado a Telegram");
     } else {
       Serial.print("Error enviando a Telegram: ");
       Serial.println(http.errorToString(httpCode));
     }
     http.end();
+  } else {
+    Serial.println("WiFi no conectado, no se puede enviar a Telegram");
   }
 }
 
-// Callback que se ejecuta cuando se recibe un mensaje del WebSocket
+// Función para decodificar base64 (se utiliza const_cast para evitar errores de conversión)
+String decodeBase64(const char* encoded) {
+  int encodedLen = strlen(encoded);
+  int decodedLen = Base64.decodedLength(const_cast<char*>(encoded), encodedLen);
+  char decoded[decodedLen + 1];
+  int actualLen = Base64.decode(decoded, const_cast<char*>(encoded), encodedLen);
+  decoded[actualLen] = '\0';
+  return String(decoded);
+}
+
 void onMessageCallback(WebsocketsMessage message) {
-  Serial.println("Evento recibido:");
+  Serial.println("Mensaje recibido:");
   Serial.println(message.data());
   
-  // Por simplicidad, se envía el mensaje tal como llega.
-  // Puedes procesarlo o extraer la información que te interese.
-  String telegramMsg = "Nueva transacción:\n" + message.data();
-  sendTelegramMessage(telegramMsg);
+  // Parsear el JSON externo
+  StaticJsonDocument<4096> doc;
+  DeserializationError err = deserializeJson(doc, message.data());
+  if (err) {
+    Serial.print("Error al parsear JSON externo: ");
+    Serial.println(err.f_str());
+    return;
+  }
+  
+  // Extraer el campo 'data' en base64 desde:
+  // result → data → value → TxResult → result → data
+  const char* txBase64 = doc["result"]["data"]["value"]["TxResult"]["result"]["data"];
+  if (!txBase64) {
+    Serial.println("No se encontró el campo tx (base64).");
+    return;
+  }
+  
+  Serial.println("Tx (base64):");
+  Serial.println(txBase64);
+  
+  // Decodificar la cadena base64
+  String decodedTx = decodeBase64(txBase64);
+  Serial.println("Tx decodificada:");
+  Serial.println(decodedTx);
+  
+  // Parsear el JSON contenido en la cadena decodificada
+  StaticJsonDocument<4096> docTx;
+  err = deserializeJson(docTx, decodedTx);
+  if (err) {
+    Serial.print("Error al parsear JSON decodificado: ");
+    Serial.println(err.f_str());
+    Serial.println("Contenido decodificado (raw):");
+    Serial.println(decodedTx);
+    return;
+  }
+  
+  // Se asume que el JSON decodificado contiene un arreglo "events"
+  JsonArray events = docTx["events"].as<JsonArray>();
+  if (!events) {
+    Serial.println("No se encontraron eventos en el JSON decodificado.");
+    return;
+  }
+  
+  // Recorre los eventos; buscamos un Swap de con_dex_v2
+  for (JsonObject event : events) {
+    const char* caller = event["caller"];
+    const char* eventType = event["event"];
+    if (caller && eventType &&
+        strcmp(caller, "con_dex_v2") == 0 && strcmp(eventType, "Swap") == 0) {
+      
+      // Extraer datos del swap desde "data"
+      JsonObject dataObj = event["data"].as<JsonObject>();
+      String amt0In = dataObj["amount0In"].as<String>();
+      String amt1In = dataObj["amount1In"].as<String>();
+      String amt0Out = dataObj["amount0Out"].as<String>();
+      String amt1Out = dataObj["amount1Out"].as<String>();
+      
+      String amountIn, amountOut, tokenIn, tokenOut;
+      
+      // Determinar cuál de los campos "In" contiene valor distinto de 0
+      if (amt0In != "0") {
+        amountIn = amt0In;
+        amountOut = amt1Out;
+      } else if (amt1In != "0") {
+        amountIn = amt1In;
+        amountOut = amt0Out;
+      } else {
+        Serial.println("No se detectó un swap válido (ambos campos de entrada son 0).");
+        continue;
+      }
+      
+      // Buscar en los eventos Transfer para extraer el nombre del token correspondiente
+      tokenIn = "";
+      tokenOut = "";
+      for (JsonObject ev : events) {
+        const char* evType = ev["event"];
+        if(evType && strcmp(evType, "Transfer") == 0) {
+          JsonObject dataEv = ev["data"].as<JsonObject>();
+          String transAmount = dataEv["amount"].as<String>();
+          const char* contractName = ev["contract"];
+          if (transAmount == amountIn && tokenIn == "") {
+            tokenIn = contractName;
+          }
+          if (transAmount == amountOut && tokenOut == "") {
+            tokenOut = contractName;
+          }
+        }
+      }
+      
+      // Si no se encontraron, se asignan nombres por defecto
+      if (tokenIn == "") tokenIn = "Token0";
+      if (tokenOut == "") tokenOut = "Token1";
+      
+      String telegramMsg = "Swap realizado:\n";
+      telegramMsg += "Entró: " + amountIn + " " + tokenIn + "\n";
+      telegramMsg += "Salió: " + amountOut + " " + tokenOut;
+      
+      // Espera un poco antes de enviar (por ejemplo, 1 segundo)
+      delay(1000);
+      
+      sendTelegramMessage(telegramMsg);
+      Serial.println(telegramMsg);
+      break;
+    } else {
+      Serial.print("Evento ignorado, caller: ");
+      Serial.println(caller ? caller : "N/A");
+    }
+  }
 }
 
 void setup() {
   Serial.begin(115200);
-  
-  // Conexión a WiFi
-  WiFi.begin(ssid, password);
   Serial.println("Conectando a WiFi...");
-  while(WiFi.status() != WL_CONNECTED) {
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
     delay(1000);
     Serial.print(".");
   }
   Serial.println("\nWiFi conectado");
-
-  // Configurar el callback para recibir mensajes del WebSocket
+  
   wsClient.onMessage(onMessageCallback);
-
-  // Conectarse al servidor WebSocket
+  
   Serial.println("Conectando al WebSocket...");
-  if(wsClient.connect(ws_server)) {
+  if (wsClient.connect(ws_server)) {
     Serial.println("Conectado al WebSocket");
-    
-    // Enviar mensaje de suscripción al evento "Tx"
+    // Suscribirse a los eventos Tx
     String subscribeMsg = "{\"jsonrpc\": \"2.0\", \"method\": \"subscribe\", \"id\": 0, \"params\": {\"query\": \"tm.event='Tx'\"}}";
     wsClient.send(subscribeMsg);
     Serial.println("Mensaje de suscripción enviado");
   } else {
-    Serial.println("No se pudo conectar al WebSocket");
+    Serial.println("Error al conectar al WebSocket");
   }
 }
 
 void loop() {
-  // Mantiene viva la conexión WebSocket y detecta mensajes entrantes
   wsClient.poll();
   delay(10);
 }
